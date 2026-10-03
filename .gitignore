@@ -1,0 +1,5 @@
+more docs dont commit/
+.DS_Store
+.venv/
+__pycache__/
+.ipynb_checkpoints/
