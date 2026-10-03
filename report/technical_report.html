@@ -75,7 +75,7 @@ scored <strong>3.606</strong> against <strong>3.560</strong> for random 5-fold &
 would allow.</p>
 
 <div class="callout nobreak">
-<span class="lead">(b) Standard validation is 11.2% optimistic here.</span>
+<span class="lead">(b) Standard validation is ~11% optimistic here.</span>
 Every gap-prone feature is missing 4&ndash;5&times; more often in test than in train. 18.2% of
 test rows carry at least one gap versus 5.8% of training rows; for rows with two or more gaps the
 split is <strong>7.7% versus 0.14% &mdash; a 55&times; difference</strong>. A model validated on
@@ -88,21 +88,27 @@ bias directly: one fitted model, same validation rows, scored <strong>3.560</str
 validation can <em>misrank</em> them. On our own earlier candidates, a Ridge model appeared 0.20
 RMSE better than gradient boosting and was actually 0.08 <em>worse</em> under test conditions.
 All model selection in this work is therefore made on <strong>RMSE with test-level missingness
-injected into every validation fold</strong>, fixed before any model was tuned.</p>
+injected into every validation fold</strong>, fixed before any model was tuned. We then tightened the protocol once more: test gaps are
+<em>clustered</em> (81.8% of rows have none, 10.5% one, 6.9% two, 0.8% three) rather than independent
+per column, so independent injection under-represents two-gap rows about 3&times;. Validation and
+training augmentation both now reproduce the test's gap-count mix, which moved our production model
+from 3.20 to an honest <strong>3.34</strong> without changing the model at all.</p>
 
 <h2>3. Approach</h2>
 <p><strong>Features.</strong> Exploration showed buildings differ in <em>shape</em>, not merely in
 level: mean usage spans 30.8 (Administration) to 79.2 (Science), while variability ranges from
 sd 6.5 (Residential, highly regular) to 19.1 (Lecture Halls, volatile). We encode this explicitly
 &mdash; per-building intercept, 24-hour profile, weekend offset, and per-building slopes on
-occupancy, temperature and previous usage (366 features) &mdash; plus cyclical hour encoding and
+occupancy, temperature and previous usage (370 features, including temperature &times; time-of-day terms for cooling load) &mdash; plus cyclical hour encoding and
 per-column missingness indicators.</p>
 
 <p><strong>Imputation.</strong> This proved the single most valuable decision. A median is not
 merely imprecise: the building slopes are products <code>is_building &times; value</code>, so one
 missing input collapses the entire building-specific relationship for that row. We instead train a
 dedicated LightGBM per gap-prone column, predicting it from building, hour and the remaining
-drivers, then regenerate the interaction terms. Crucially the imputer predicts <em>features from
+drivers, then regenerate the interaction terms. The v2 imputer passes co-missing predictors to LightGBM as NaN instead of a fake median
+(3.338 &rarr; 3.291; rows missing occupancy <em>and</em> usage fell from 7.45 to 6.38 RMSE).
+Crucially the imputer predicts <em>features from
 features</em> &mdash; the target is never involved &mdash; so it can legitimately be fitted on the
 training and test features together, giving it 11,000 rows instead of 8,000 and direct exposure to
 the distribution it must impute into. Tested on identical folds:</p>
@@ -122,44 +128,48 @@ data to test-level missingness improved every model tested (CatBoost by 0.265) a
 variance. This uses only the observed missingness <em>rate</em> of the test features &mdash; no
 test labels are involved.</p>
 
-<h2>4. Model selection, and rejecting the ensemble</h2>
-<p>Ridge with explicit building interactions outperformed every gradient-boosted alternative. The
-structure here is close to additive &mdash; a building's base level, its own daily profile, and
-near-linear responses to its drivers &mdash; which a regularised linear model fits directly and
-extrapolates from sensibly, while trees must approximate smooth relationships with axis-aligned
-splits.</p>
+<h2>4. Model selection</h2>
+<p>A regularised linear model on explicit building interactions beat every gradient-boosted
+model standalone, because the structure is close to additive: a building's base level, its own daily
+profile, and near-linear responses to its drivers. On complete rows Ridge scores <strong>3.04</strong>
+against 3.35 for LightGBM. For v2 we blend Ridge with an MLP and a native-NaN LightGBM, because they
+make different errors. The weights are fixed NNLS values (0.66 / 0.22 / 0.12), fitted on one CV
+repeat and scored on another, so the gain is held-out rather than self-graded. Rows missing
+<code>previous_usage</code> get their own weights, leaning ~48% on a Ridge trained without that
+feature: when the strongest input is absent, a model that never relied on it beats imputing it.</p>
 
 <table class="nobreak">
-<tr><th>Model <span class="muted">(realistic validation)</span></th><th class="n">RMSE</th><th class="n">MAE</th></tr>
-<tr><td><strong>Ridge + building interactions</strong></td><td class="n win">3.199</td><td class="n">2.507</td></tr>
-<tr><td>CatBoost</td><td class="n">3.487</td><td class="n">2.708</td></tr>
-<tr><td>LightGBM</td><td class="n">3.548</td><td class="n">2.759</td></tr>
-<tr><td>XGBoost</td><td class="n">3.582</td><td class="n">2.783</td></tr>
-<tr><td>4-model weighted stack <span class="muted">(nested)</span></td><td class="n">3.261</td><td class="n">&mdash;</td></tr>
+<tr><th>Step <span class="muted">(test-matched validation)</span></th><th class="n">RMSE</th></tr>
+<tr><td>v1: Ridge, sub-model imputer</td><td class="n">3.338</td></tr>
+<tr><td>+ NaN-native imputer</td><td class="n">3.291</td></tr>
+<tr><td>+ Ridge / MLP / LightGBM blend</td><td class="n">3.265</td></tr>
+<tr><td><strong>+ separate weights when usage is missing</strong></td><td class="n win">3.258</td></tr>
 </table>
 
-<p>We built the ensemble and rejected it. Scored conventionally it appeared best (3.226), but those
-weights were fitted on the predictions being scored. Nested &mdash; weights learned on inner folds,
-evaluated on an untouched outer fold &mdash; it scored <strong>3.261, worse than the single
-Ridge</strong>. Its advantage was 0.035 RMSE of self-deception: the same error we had diagnosed in
-the validation protocol, caught in our own work.</p>
+<p>We rejected more than we kept. An earlier four-model stack looked best (3.226) only because its
+weights were fitted on the predictions being scored; nested it scored 3.261, worse than Ridge alone.
+That lesson is why the v2 blend is evaluated across repeats, and why 14 further feature families,
+scenario indicators and scenario-weighted training were dropped: none beat plain Ridge.</p>
 
 <h2>5. Result</h2>
 <div class="kpi nobreak">
-  <div><span class="v">3.199</span><span class="l">RMSE</span></div>
-  <div><span class="v">2.507</span><span class="l">MAE</span></div>
-  <div><span class="v">0.970</span><span class="l">R&sup2;</span></div>
+  <div><span class="v">3.26&ndash;3.28</span><span class="l">RMSE, test-matched CV</span></div>
+  <div><span class="v">3.04</span><span class="l">RMSE, complete rows only</span></div>
+  <div><span class="v">3.34</span><span class="l">public leaderboard</span></div>
 </div>
-<p>Against references of 18.45 (predict the mean), 13.22 (building mean) and 6.40 (copy
-<code>previous_usage</code>, no model). All figures are under injected test-level missingness;
-conventional validation reports materially better numbers we do not consider trustworthy.</p>
+<p>References: 18.45 (predict the mean), 13.22 (building mean), 6.40 (copy
+<code>previous_usage</code>, no model). Reweighting our out-of-fold errors to the test file's
+composition gives 3.34, matching the public score. The test oversamples extreme scenarios about 5&times;
+(heatwave afternoons, occupancy surges, sudden usage drops), and these carry the extra error. The
+public subset's own noise (sd &ge; 0.08) is larger than the gaps between our candidates, so we did not
+tune against it.</p>
 
 <h2>6. Error analysis</h2>
 <p>Residuals are centred and symmetric, with no bias across the prediction range. Error tracks each
 building's intrinsic volatility: Lecture Halls hardest, Residential easiest. Much is irreducible, but
 it means a campus-wide average understates uncertainty on exactly the buildings an operator would
-most want warning about. Error also rises with missing-input count, far more gently than median
-imputation produces.</p>
+most want warning about. Error rises with missing-input count: two-gap rows score about 4.7 RMSE against 3.3
+overall, and heatwave afternoons about 6.2.</p>
 
 <h2>7. Covariate shift: detected, and deliberately not corrected</h2>
 <p>A classifier trained to separate training rows from test rows reaches <strong>AUC 0.688</strong>
@@ -186,7 +196,11 @@ alternatives.</li>
 <li><strong>High-variance buildings dominate residual error.</strong> Per-building or
 mixed-effects models are the next step, alongside a cost-weighted error view &mdash; a 5-unit error
 on a 30-unit admin block matters more proportionally than on an 80-unit science building.</li>
-<li><strong>Thirty-three variations were tested; four were kept.</strong> Rejected on evidence:
+<li><strong>The floor is close.</strong> Complete rows alone score 3.04, residuals show no group
+effects by building, month or hour, and the learning curve flattens near 4,500 rows. We estimate
+the noise floor on this feature set at about 3, so large further gains would need information the
+dataset does not contain.</li>
+<li><strong>Dozens of variations were tested; few were kept.</strong> Rejected on evidence:
 log and delta target framings, extra interaction families, splines, residual boosting, target
 encoding, per-building models, specialist routing for gap rows, imputer tuning, pseudo-labelling
 and importance weighting. We read this as a sign the remaining error is largely irreducible &mdash;
