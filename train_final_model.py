@@ -40,8 +40,14 @@ HELPER = ["hour", "month", "dow", "weekend", "building_code"]
 # ---------------------------------------------------------------------------
 # Feature engineering  (must be copied verbatim into the prediction notebook)
 # ---------------------------------------------------------------------------
-def make_features(df):
-    """Pure: learns nothing from data, so train and test transform identically."""
+def make_features(df, drop_prev=False):
+    """Pure: learns nothing from data, so train and test transform identically.
+
+    drop_prev=True builds the feature set WITHOUT previous_usage and its building
+    slopes. That is the specialist model's view: for rows where previous_usage was
+    never observed, routing to a model that never relied on it beats feeding the
+    main model an imputed guess (-0.030 RMSE, winning every validation repeat).
+    """
     df = df.copy()
     X = pd.DataFrame(index=df.index)
 
@@ -54,19 +60,24 @@ def make_features(df):
     X["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
     X["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
 
-    for c in NUMERIC:
+    used = [c for c in NUMERIC if not (drop_prev and c == "previous_usage")]
+    for c in used:
         X[c] = df[c]
         X[c + "_missing"] = df[c].isna().astype(int)
     X["n_missing"] = df[NUMERIC].isna().sum(axis=1)
 
     X["building_code"] = df["building_id"].map({b: i for i, b in enumerate(BUILDINGS)})
 
+    slopes = [("occupancy", "occ"), ("temperature", "temp")]
+    if not drop_prev:
+        slopes.append(("previous_usage", "prev"))
+
     extra = {}
     for b in BUILDINGS:
         is_b = (df["building_id"] == b).astype(float)
         extra[f"b_{b}"] = is_b
         extra[f"b_{b}_weekend"] = is_b * X["weekend"]
-        for src, nm in [("occupancy", "occ"), ("temperature", "temp"), ("previous_usage", "prev")]:
+        for src, nm in slopes:
             extra[f"b_{b}_{nm}"] = is_b * df[src]
         for h in range(24):
             extra[f"b_{b}_h{h}"] = is_b * (df["hour"] == h).astype(float)
@@ -90,16 +101,20 @@ class SubModelImputer(BaseEstimator, TransformerMixin):
     legitimate and gives the imputer the test feature distribution.
     """
 
-    def __init__(self, extra_frame=None):
+    def __init__(self, extra_frame=None, passes=1):
         self.extra_frame = extra_frame
+        self.passes = passes
 
     def fit(self, X, y=None):
         src = X if self.extra_frame is None else pd.concat([X, self.extra_frame], ignore_index=True)
+        # Only impute the gap-prone columns this feature view actually contains.
+        # The specialist view has no previous_usage, so it must not try to fill it.
+        self.cols_ = [c for c in NUMERIC if c in X.columns]
         self.models_, self.median_ = {}, {}
-        for c in NUMERIC:
+        for c in self.cols_:
             self.median_[c] = src[c].median()
             observed = src[c].notna()
-            feats = HELPER + [o for o in NUMERIC if o != c]
+            feats = HELPER + [o for o in self.cols_ if o != c]
             if observed.sum() < 50:
                 self.models_[c] = None
                 continue
@@ -111,19 +126,26 @@ class SubModelImputer(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         X = X.copy()
-        for c in NUMERIC:
-            gaps = X[c].isna()
-            if not gaps.any():
-                continue
-            if self.models_[c] is None:
-                X.loc[gaps, c] = self.median_[c]
-            else:
-                m, feats = self.models_[c]
-                tmp = X.loc[gaps, feats].copy()
-                for col in feats:
-                    if tmp[col].isna().any():
-                        tmp[col] = tmp[col].fillna(self.median_.get(col, 0.0))
-                X.loc[gaps, c] = m.predict(tmp)
+        # Remember which cells were ORIGINALLY missing, so later passes re-estimate
+        # the same cells rather than the ones a previous pass filled in.
+        original_gaps = {c: X[c].isna().to_numpy() for c in self.cols_}
+
+        # Pass 1 predicts a gap using median-filled neighbours; pass 2 repeats it with
+        # those neighbours now model-filled, so each estimate sees better inputs.
+        for _ in range(self.passes):
+            for c in self.cols_:
+                gaps = original_gaps[c]
+                if not gaps.any():
+                    continue
+                if self.models_[c] is None:
+                    X.loc[gaps, c] = self.median_[c]
+                else:
+                    m, feats = self.models_[c]
+                    tmp = X.loc[gaps, feats].copy()
+                    for col in feats:
+                        if tmp[col].isna().any():
+                            tmp[col] = tmp[col].fillna(self.median_.get(col, 0.0))
+                    X.loc[gaps, c] = m.predict(tmp)
 
         # derived terms were built from the raw (gappy) columns -- rebuild them
         for b in BUILDINGS:
@@ -131,7 +153,7 @@ class SubModelImputer(BaseEstimator, TransformerMixin):
                 continue
             is_b = X[f"b_{b}"]
             for src, nm in [("occupancy", "occ"), ("temperature", "temp"), ("previous_usage", "prev")]:
-                if f"b_{b}_{nm}" in X.columns:
+                if f"b_{b}_{nm}" in X.columns and src in X.columns:
                     X[f"b_{b}_{nm}"] = is_b * X[src]
         if "temp_sq" in X.columns:
             X["temp_sq"] = X["temperature"] ** 2
@@ -165,26 +187,54 @@ if __name__ == "__main__":
             out.iloc[idx, out.columns.get_loc(c)] = np.nan
         return out
 
-    test_features = make_features(test)          # unlabelled, for the transductive imputer
+    # Two feature views: the full one, and the specialist's (no previous_usage)
+    test_features = make_features(test)                      # for the transductive imputer
+    test_features_np = make_features(test, drop_prev=True)
     feature_names = list(test_features.columns)
+    feature_names_np = list(test_features_np.columns)
 
-    models = []
+    def build():
+        return make_pipeline(SubModelImputer(extra_frame=test_features),
+                             StandardScaler(), RidgeCV(alphas=np.logspace(-2, 3, 30)))
+
+    def build_np():
+        return make_pipeline(SubModelImputer(extra_frame=test_features_np),
+                             StandardScaler(), RidgeCV(alphas=np.logspace(-2, 3, 30)))
+
+    models, models_np = [], []
     for s in range(N_SEEDS):
         rng = np.random.default_rng(RANDOM_STATE + 100 * s)
-        X_aug = make_features(inject(train, rng))
-        pipe = make_pipeline(
-            SubModelImputer(extra_frame=test_features),
-            StandardScaler(),
-            RidgeCV(alphas=np.logspace(-2, 3, 30)),
-        )
-        pipe.fit(X_aug[feature_names], y)
-        models.append(pipe)
-        print(f"  seed {s + 1}/{N_SEEDS} fitted (alpha={pipe[-1].alpha_:.3f})")
+        raw_aug = inject(train, rng)
 
-    joblib.dump((models, feature_names), "model.pkl")
-    print(f"\nsaved model.pkl ({os.path.getsize('model.pkl') / 1e6:.2f} MB), "
-          f"{len(models)} models x {len(feature_names)} features")
+        main = build()
+        main.fit(make_features(raw_aug)[feature_names], y)
+        models.append(main)
 
+        spec = build_np()
+        spec.fit(make_features(raw_aug, drop_prev=True)[feature_names_np], y)
+        models_np.append(spec)
+        print(f"  seed {s + 1}/{N_SEEDS}: main alpha={main[-1].alpha_:.3f}, "
+              f"specialist alpha={spec[-1].alpha_:.3f}")
+
+    bundle = {
+        "models": models,                      # main: uses previous_usage
+        "features": feature_names,
+        "models_no_prev": models_np,           # specialist: for rows missing previous_usage
+        "features_no_prev": feature_names_np,
+    }
+    joblib.dump(bundle, "model.pkl")
+    print(f"\nsaved model.pkl ({os.path.getsize('model.pkl') / 1e6:.2f} MB)")
+    print(f"  main       : {len(models)} models x {len(feature_names)} features")
+    print(f"  specialist : {len(models_np)} models x {len(feature_names_np)} features")
+
+    # routed prediction, exactly as the prediction notebook does it
     preds = np.mean([m.predict(test_features[feature_names]) for m in models], axis=0)
-    print(f"sanity: {len(preds)} predictions, mean {preds.mean():.2f}, "
-          f"range [{preds.min():.2f}, {preds.max():.2f}], finite={np.isfinite(preds).all()}")
+    gap = test["previous_usage"].isna().to_numpy()
+    if gap.any():
+        spec_preds = np.mean([m.predict(test_features_np[feature_names_np])
+                              for m in models_np], axis=0)
+        preds[gap] = spec_preds[gap]
+    print(f"\nsanity: {len(preds)} predictions, {gap.sum()} routed to the specialist "
+          f"({gap.mean()*100:.1f}%)")
+    print(f"        mean {preds.mean():.2f}, range [{preds.min():.2f}, {preds.max():.2f}], "
+          f"finite={np.isfinite(preds).all()}")
