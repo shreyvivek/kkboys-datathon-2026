@@ -1,10 +1,12 @@
-numpy==2.4.6
-pandas==3.0.6
-scikit-learn==1.9.1
-scipy==1.17.1
-lightgbm==4.7.0
+# Versions the training notebook and train_final_model.py were verified with (Python 3.11).
+# These are the platform image's versions (requirements-image.txt) plus catboost, which only the
+# Phase 2 model comparison in the training notebook uses. model.pkl is trained under them.
+numpy==2.1.3
+scipy==1.14.1
+pandas==2.2.3
+scikit-learn==1.5.2
+joblib==1.4.2
+lightgbm==4.5.0
+xgboost==2.1.3
 catboost==1.2.10
-xgboost==3.2.0
-matplotlib==3.11.2
-joblib==1.6.0
-cloudpickle==3.1.2
+matplotlib==3.9.2

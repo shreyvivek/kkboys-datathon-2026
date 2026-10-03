@@ -41,6 +41,7 @@ every validation fold). Naive numbers are never used to decide anything.
 | **D10** | **Augment training data** with injected missingness at test rates | Training contains ~11 multi-gap examples vs 231 in test — the model had almost no exposure to the regime it is graded on | Helped every model: CatBoost −0.265, XGBoost −0.150, HistGBR −0.134, LightGBM −0.115, Ridge −0.069. Also halved fold variance (CatBoost sd 0.150 → 0.067) |
 | **D11** | **Ship Ridge alone — reject the 4-model ensemble** | Non-nested, the stack looked better (3.2259). Nested, it scores 3.2605 — *worse* than Ridge at 3.2326. The apparent edge was weights fitted on the scored predictions. Also fails the brief's "best model ≠ most complex model", and Ridge coefficients are interpretable for the proposal/Q&A | Nested stack 3.2605 ± 0.0196 across 3 outer folds (weights 71–82% Ridge); Ridge alone 3.2326 |
 | **D12** | Serialise `model.pkl` with `cloudpickle` (by value), not plain joblib | The pipeline contains a custom transformer; a standard pickle stores only a class *reference*, so loading in a fresh notebook would raise `AttributeError`. By-value embeds the definition | Verified: loads and predicts in an empty directory, fresh process, zero class definitions present |
+| **D13** | **Reject a dedicated "no-`previous_usage`" model** for rows where `previous_usage` is missing (a second Ridge trained with every prev column removed, routed in by an if-missing switch) | Idea: avoid applying the strong `previous_usage` weight to an *estimated* value. But the sub-model imputer + rebuilt slope terms + augmentation (D8–D10) already capture this; the extra model adds a moving part for no gain | 5× repeated 5-fold realistic CV (seeds 42, 1–4), paired vs Ridge alone: routed **+0.0087 RMSE, worse in 4/5**; also worse on prev-missing rows (4.194 vs 4.095). Averaging both on those rows: −0.0006, better in 3/5 — inside noise |
 
 ### Final model
 
@@ -171,3 +172,19 @@ transductive imputation + seed averaging).
   organisers**; a format mismatch would score zero silently.
 - Error analysis by building (high-variance buildings like LectureHall dominate residual error)
   is not yet written up — it is explicitly named in Track 1's judging focus.
+
+---
+
+## Phase 9 — test-matched validation & v2 model (2026-10-03, in progress)
+
+| # | Decision | Justification | Evidence |
+|---|---|---|---|
+| **D28** | **Replace independent per-column NaN injection with test-matched gap patterns** (validation *and* training augmentation) | Test gaps are clustered by count, not independent: 81.8% none / 10.5% one / **6.9% two** / 0.8% three, with the gapped columns uniform and unrelated to building/hour/values. Independent injection gives only ~2.6% two-gap rows, so it under-weights exactly the hardest rows ~3× | Pair lifts over independence in test: 2.7–4.0×. Current production model scores **3.338** under test-matched validation (vs 3.20 under the old protocol) |
+| **D29** | **NaN-native imputer**: co-missing predictors passed to the per-column LightGBMs as NaN (not median-filled), plus 15% predictor-gap augmentation when fitting them | The old imputer filled a co-missing driver with its global median before imputing, so a row missing occupancy *and* prev imputed each from a fake value of the other | 3.338 → **3.291** (mean of 2 CV reps); occ+prev rows 7.45/6.70 → 6.38/5.55 |
+| **D30** | **Blend Ridge with an MLP and a native-NaN LightGBM** (fixed NNLS weights 0.66/0.22/0.12) | Complete-row linear modelling is saturated (14 feature families, stacking, transition-hour terms all ≥ Ridge), but an MLP is a genuinely different error source | 3.291 → **3.265** held out across reps (weights fit on one rep, scored on the other) |
+| **D31** | **Rows missing `previous_usage` get their own weights, leaning ~48% on a Ridge trained without prev** | When the strongest feature is absent, a model that never relied on it beats imputing it. Two groups only: a 7-group/pair-level scheme scored the same (3.2572) with ~25 more weights and visibly overfit on ~100-row groups | **3.258** held out; weights stable across reps |
+| **D32** | Reject scenario-regime features and scenario-weighted training | The test oversamples generated scenarios ~5× (heatwave 34–36 °C at 12–16h: 0.9%→4.3%; storm humidity ≥95: 0.9%→4.3%; night prev-drop: 0.6%→3.5%; occupancy surges: 2%→10%). Their extra error is noise, not missed structure | Indicator/interaction features and test-ratio sample weights all worse even on a test-weighted metric (3.094–3.147 vs 3.089) |
+
+**Net (test-matched CV, before 5-seed averaging): 3.338 → 3.258 (−0.081).**
+Pending: production-class CV check (`train_final_model.py --cv`), final 5-seed `model.pkl`, sandbox run of the
+regenerated prediction notebook, report update.
