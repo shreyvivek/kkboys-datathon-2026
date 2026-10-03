@@ -34,6 +34,8 @@ from sklearn.neural_network import MLPRegressor
 
 RANDOM_STATE = 42
 N_SEEDS = 5
+# Per-building hour profile: 0 = one dummy per building x hour (v2); K > 0 = K sin/cos harmonics per building.
+HOUR_K = int(os.environ.get("HOUR_K", "0"))
 
 BUILDINGS = ["ADM_A", "BUS_A", "BUS_B", "ENG_A", "ENG_B", "LEC_A",
              "LIB_A", "RES_A", "RES_B", "SCI_A", "SCI_B", "SPT_A"]
@@ -83,8 +85,13 @@ def make_features(df):
         extra[f"b_{b}_weekend"] = is_b * X["weekend"]
         for src, nm in [("occupancy", "occ"), ("temperature", "temp"), ("previous_usage", "prev")]:
             extra[f"b_{b}_{nm}"] = is_b * df[src]
-        for h in range(24):
-            extra[f"b_{b}_h{h}"] = is_b * (df["hour"] == h).astype(float)
+        if HOUR_K == 0:
+            for h in range(24):
+                extra[f"b_{b}_h{h}"] = is_b * (df["hour"] == h).astype(float)
+        else:
+            for k in range(1, HOUR_K + 1):
+                extra[f"b_{b}_hs{k}"] = is_b * np.sin(2 * np.pi * k * df["hour"] / 24)
+                extra[f"b_{b}_hc{k}"] = is_b * np.cos(2 * np.pi * k * df["hour"] / 24)
 
     # temperature x time-of-day: cooling load depends on heat and hour jointly
     t = df["temperature"]
