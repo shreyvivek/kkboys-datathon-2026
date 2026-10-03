@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Technical Report — Track 1</title>
+<style>
+  @page { size: A4; margin: 9mm 10mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Charter", "Georgia", "Times New Roman", serif;
+    font-size: 7.9pt;
+    line-height: 1.26;
+    color: #1a1a1a;
+  }
+  h1 { font-size: 12pt; margin: 0 0 1pt 0; letter-spacing: -0.2pt; }
+  .sub { font-size: 8pt; color: #555; margin: 0 0 6pt 0;
+         border-bottom: 1.2pt solid #1a1a1a; padding-bottom: 4pt; }
+  .sub strong { color: #1a1a1a; }
+  h2 { font-size: 8.1pt; margin: 5pt 0 2pt 0; text-transform: uppercase;
+       letter-spacing: 0.5pt; font-family: "Helvetica Neue", Arial, sans-serif;
+       color: #000; border-left: 2.5pt solid #c2410c; padding-left: 4pt; }
+  p { margin: 0 0 3pt 0; text-align: justify; }
+  .cols { column-count: 2; column-gap: 7mm; column-rule: 0.4pt solid #ddd; }
+  .nobreak { break-inside: avoid; }
+  table { width: 100%; border-collapse: collapse; margin: 3pt 0 5pt 0; font-size: 7.2pt;
+          font-family: "Helvetica Neue", Arial, sans-serif; }
+  th { text-align: left; font-weight: 600; border-bottom: 0.8pt solid #1a1a1a;
+       padding: 1.8pt 3pt; font-size: 7.2pt; text-transform: uppercase; letter-spacing: 0.3pt; }
+  td { padding: 1.8pt 3pt; border-bottom: 0.3pt solid #e2e2e2; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .win { font-weight: 700; color: #c2410c; }
+  .muted { color: #777; }
+  code { font-family: "SF Mono", Menlo, monospace; font-size: 7.4pt; background: #f2f2f2;
+         padding: 0 1.5pt; border-radius: 1.5pt; }
+  .callout { border: 0.7pt solid #c2410c; background: #fff7f3; padding: 4pt 5pt;
+             margin: 4pt 0 5pt 0; break-inside: avoid; }
+  .callout .lead { font-weight: 700; color: #c2410c; font-size: 8.2pt;
+                   font-family: "Helvetica Neue", Arial, sans-serif; display: block;
+                   margin-bottom: 1.5pt; }
+  ul { margin: 2pt 0 4pt 0; padding-left: 10pt; }
+  li { margin-bottom: 1.8pt; }
+  .kpi { display: flex; gap: 5pt; margin: 2pt 0 5pt 0; }
+  .kpi div { flex: 1; border: 0.7pt solid #1a1a1a; padding: 3pt 4pt; text-align: center; }
+  .kpi .v { font-size: 11.5pt; font-weight: 700; font-family: "Helvetica Neue", Arial, sans-serif;
+            display: block; line-height: 1.05; letter-spacing: -0.4pt; }
+  .kpi .l { font-size: 6.4pt; text-transform: uppercase; letter-spacing: 0.45pt; color: #555;
+            font-family: "Helvetica Neue", Arial, sans-serif; }
+</style>
+</head>
+<body>
+
+<h1>Predicting Campus Facility Energy Consumption</h1>
+<p class="sub"><strong>NTU Datathon 2026 &middot; Track 1: Smart Campus Analytics</strong> &nbsp;|&nbsp;
+Team kkboys &nbsp;|&nbsp; Regression &middot; 8,000 train / 3,000 test &middot; evaluated by RMSE</p>
+
+<div class="cols">
+
+<h2>1. The problem, and what makes it hard</h2>
+<p>We predict <code>energy_usage</code> for a campus building from its identity, time, weather,
+occupancy and its preceding reading. The headline difficulty is not
+finding signal — <code>previous_usage</code> alone correlates 0.945 with the target, and simply
+copying it forward scores RMSE 6.40. The difficulty is that <em>the test set is systematically
+harder than the training set</em>, in a way that silently corrupts how a team measures its own
+progress.</p>
+
+<h2>2. Two findings that shaped everything</h2>
+
+<p><strong>(a) This is not a time series, despite looking like one.</strong> The data has
+<code>hour</code>, <code>day_of_week</code> and <code>month</code> columns, a lag feature, and a
+tidy ID split (train EC000001&ndash;008000, test EC008001&ndash;011000). The natural response is a
+time-aware split. We tested that assumption instead of inheriting it: there is no timestamp, so
+ordering is undefined; every correlation between ID number and any feature falls within
+&plusmn;0.016; and an ID-ordered holdout scored <strong>3.606</strong> against
+<strong>3.560</strong> for random 5-fold &mdash; a gap smaller than the &plusmn;0.071 fold noise.
+We therefore use random K-fold, keeping 20% more training data than a time split would allow,
+with evidence rather than assertion behind the choice.</p>
+
+<div class="callout nobreak">
+<span class="lead">(b) Standard validation is 11.2% optimistic here.</span>
+Every gap-prone feature is missing 4&ndash;5&times; more often in test than in train. 18.2% of
+test rows carry at least one gap versus 5.8% of training rows; for rows with two or more gaps the
+split is <strong>7.7% versus 0.14% &mdash; a 55&times; difference</strong>. A model validated on
+training-like data is therefore graded on an easier problem than it will face. We measured the
+bias directly: one fitted model, same validation rows, scored <strong>3.560</strong> as-is and
+<strong>3.960</strong> once the fold was degraded to test-level missingness.
+</div>
+
+<p>The consequence is worse than an inflated number. Models degrade at different rates, so naive
+validation can <em>misrank</em> them. On our own earlier candidates, a Ridge model appeared 0.20
+RMSE better than gradient boosting and was actually 0.08 <em>worse</em> under test conditions.
+All model selection in this work is therefore made on <strong>RMSE with test-level missingness
+injected into every validation fold</strong>, fixed before any model was tuned.</p>
+
+<h2>3. Approach</h2>
+<p><strong>Features.</strong> Exploration showed buildings differ in <em>shape</em>, not merely in
+level: mean usage spans 30.8 (Administration) to 79.2 (Science), while variability ranges from
+sd 6.5 (Residential, highly regular) to 19.1 (Lecture Halls, volatile). We encode this explicitly
+&mdash; per-building intercept, 24-hour profile, weekend offset, and per-building slopes on
+occupancy, temperature and previous usage (366 features) &mdash; plus cyclical hour encoding and
+per-column missingness indicators.</p>
+
+<p><strong>Imputation.</strong> This proved the single most valuable decision. A median is not
+merely imprecise: the building slopes are products <code>is_building &times; value</code>, so one
+missing input collapses the entire building-specific relationship for that row. We instead train a
+dedicated LightGBM per gap-prone column, predicting it from building, hour and the remaining
+drivers, then regenerate the interaction terms. Tested against the alternatives on identical
+folds:</p>
+
+<table class="nobreak">
+<tr><th>Imputation strategy</th><th class="n">RMSE</th></tr>
+<tr><td>Global median <span class="muted">(standard practice)</span></td><td class="n">3.852</td></tr>
+<tr><td>Building-level median</td><td class="n">3.614</td></tr>
+<tr><td>MICE / iterative imputer</td><td class="n">3.562</td></tr>
+<tr><td><strong>Sub-model (LightGBM per column)</strong></td><td class="n win">3.339</td></tr>
+</table>
+
+<p><strong>Augmentation.</strong> Training contains roughly 11 multi-gap rows against ~231 in
+test, so the model has almost no exposure to the regime it is graded on. Degrading the training
+data to test-level missingness improved every model tested (CatBoost by 0.265) and halved fold
+variance. This uses only the observed missingness <em>rate</em> of the test features &mdash; no
+test labels are involved.</p>
+
+<h2>4. Model selection, and rejecting the ensemble</h2>
+<p>Ridge with explicit building interactions outperformed every gradient-boosted alternative. The
+structure here is close to additive &mdash; a building's base level, its own daily profile, and
+near-linear responses to its drivers &mdash; which a regularised linear model fits directly and
+extrapolates from sensibly, while trees must approximate smooth relationships with axis-aligned
+splits.</p>
+
+<table class="nobreak">
+<tr><th>Model <span class="muted">(realistic validation)</span></th><th class="n">RMSE</th><th class="n">MAE</th></tr>
+<tr><td><strong>Ridge + building interactions</strong></td><td class="n win">3.233</td><td class="n">2.528</td></tr>
+<tr><td>CatBoost</td><td class="n">3.487</td><td class="n">2.708</td></tr>
+<tr><td>LightGBM</td><td class="n">3.548</td><td class="n">2.759</td></tr>
+<tr><td>XGBoost</td><td class="n">3.582</td><td class="n">2.783</td></tr>
+<tr><td>4-model weighted stack <span class="muted">(nested)</span></td><td class="n">3.261</td><td class="n">&mdash;</td></tr>
+</table>
+
+<p>We built the ensemble and then rejected it. Scored conventionally it appeared best (3.226), but
+those blend weights had been fitted on the very predictions being scored. Under nested validation
+&mdash; weights learned on inner folds, evaluated on an untouched outer fold &mdash; it scored
+<strong>3.261, worse than the single Ridge at 3.233</strong>. Its apparent advantage was 0.035
+RMSE of self-deception: the same category of error we had diagnosed in the validation protocol,
+caught this time in our own work.</p>
+
+<h2>5. Result</h2>
+<div class="kpi nobreak">
+  <div><span class="v">3.233</span><span class="l">RMSE</span></div>
+  <div><span class="v">2.528</span><span class="l">MAE</span></div>
+  <div><span class="v">0.969</span><span class="l">R&sup2;</span></div>
+</div>
+<p>Against references of 18.45 (predict the mean), 13.22 (building mean) and 6.40 (copy
+<code>previous_usage</code>, no model). All figures are under injected test-level missingness;
+conventional validation reports materially better numbers we do not consider trustworthy.</p>
+
+<h2>6. Error analysis</h2>
+<p>Residuals are centred and symmetric, with no bias across the prediction range. Error tracks
+each building's intrinsic volatility: Lecture Halls hardest, Residential easiest. Much of this is
+irreducible &mdash; a lecture hall genuinely is less predictable than a dormitory &mdash; but it
+means a campus-wide average understates uncertainty on exactly the buildings an operator would most
+want warning about. Error also rises with the number of missing inputs, though far more gently than
+median imputation produces.</p>
+
+<h2>7. Limitations and next steps</h2>
+<ul>
+<li><strong>No timestamps</strong>, so genuine lag or rolling features are impossible;
+<code>previous_usage</code> is the only history available.</li>
+<li><strong>Imputation error is invisible downstream.</strong> Missingness flags let the model
+discount estimated values; propagating imputation uncertainty would be the principled fix.</li>
+<li><strong>Augmentation rates are calibrated to the public test set.</strong> If the private set
+is harsher those rates are slightly off, though this approach should still degrade more gracefully
+than median-based alternatives.</li>
+<li><strong>High-variance buildings dominate residual error.</strong> Per-building or
+mixed-effects models are the next step, alongside a cost-weighted error view &mdash; a 5-unit error
+on a 30-unit admin block matters more proportionally than on an 80-unit science building.</li>
+<li>Eight further variations were tested and rejected on evidence &mdash; log and delta target
+framings, extra interactions, splines, imputer tuning, and a specialist model routing rows lacking
+<code>previous_usage</code>. None improved on the reported figure, which we read as a sign the
+remaining error is largely irreducible.</li>
+</ul>
+
+</div>
+</body>
+</html>

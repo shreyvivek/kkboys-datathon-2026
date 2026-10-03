@@ -74,6 +74,42 @@ trained on missingness-augmented data.**
 | Earlier team blend (naive 3.297) measured honestly | 3.745 |
 | **Final model** | **3.233** |
 
+---
+
+## Phase 3 / 5 — optimisation attempts
+
+Twelve further variations tested on the same protocol. **One kept.** The reference point for all
+of these is the single-seed model at **3.2257**.
+
+| # | Decision | Justification | Evidence |
+|---|---|---|---|
+| **D13** | **Keep the raw target** — reject `log1p` and delta framings (closes D5) | RMSE is scored on the raw scale, so a transform changes the implied loss. The delta framing additionally makes the prediction *structurally dependent* on `previous_usage`, which is absent in 6.8% of test rows — recovering a prediction requires adding back a column that isn't there | log1p **3.571**; delta **5.594** vs raw **3.226** |
+| **D14** | Reject additional interaction terms, splines, and `n_missing` interactions | The existing 288 building×hour profile terms and per-building slopes already express this structure; adding global versions duplicates it | extra interactions 3.247; splines 3.245; `n_missing`×prev 3.226 (identical to baseline) |
+| **D15** | Reject a specialist model for rows missing `previous_usage` | Routing those rows to a model trained without the feature scores the same as imputing it — meaning the sub-model imputer is already performing as well as avoiding the feature entirely. Imputation is no longer the bottleneck | specialist routing 3.228 vs 3.226 |
+| **D16** | Keep the imputer at 300 trees / lr 0.05, single pass | Larger and iterated imputers do not help; the bigger configuration overfits the observed rows | 800 trees 3.258; 800 2-pass 3.238; 1500 trees/63 leaves 3.241 |
+| **D17** | **Keep augmentation at exactly the observed test rate (×1.0)** | Confirms the original choice with evidence. Training on conditions harsher than reality degrades the learnable signal faster than it builds robustness | ×0.5 **3.230**, ×1.0 **3.226**, ×1.5 **3.231**, ×2.0 **3.238** |
+| **D18** | **Adopt 5-seed averaging** (the one accepted change) | The augmentation draw is random, so the seed is an arbitrary choice; averaging removes it. Variance reduction within a single model class, so it does not contradict rejecting the heterogeneous ensemble. Gain is small and inside fold noise — adopted because it is near-risk-free, not claimed as material | 1 seed 3.2257 → 3 seeds 3.2188 → **5 seeds 3.2176** |
+| — | *Not adopted:* 10-fold CV | Scores better (3.2173) but this changes the **measurement**, not the model — the final model trains on 100% of data regardless. Treated as a better estimate, not an improvement | — |
+
+### Interpretation
+
+Eleven rejections out of twelve is itself a finding: with `previous_usage` correlating 0.945 with
+the target, the remaining error is largely irreducible, concentrated in genuinely volatile
+buildings. Effort was redirected to the technical report and error analysis, which carry 40% of
+the Round 1 score.
+
+---
+
+## Deliverables
+
+| File | Status |
+|---|---|
+| `Track1_Smart_Campus_Analytics.ipynb` | Full pipeline, executes end-to-end with zero errors |
+| `model.pkl` | Seed-averaged final model, `cloudpickle` by-value, verified in a clean environment |
+| `report/technical_report.pdf` | 1 page, verified |
+| `requirements.txt` | All notebook dependencies pinned |
+| `predict_from_model.py` | Standalone inference script |
+
 ### Open items
 
 - Submission CSV currently has a single `prediction` column and no `id`, matching the booklet's
