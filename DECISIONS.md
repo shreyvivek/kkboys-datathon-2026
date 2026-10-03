@@ -100,6 +100,60 @@ the Round 1 score.
 
 ---
 
+## Phase 6–8 — further optimisation
+
+| # | Decision | Justification | Evidence |
+|---|---|---|---|
+| **D19** | **Adopt `temperature × hour` interactions** (`temp × hour_sin/cos`, `temp²`, `temp × occupancy`) | Cooling load depends on heat *and* time of day jointly — a hot afternoon is not a hot 3am. This was the one feature family never encoded | 3.2458 → **3.2399** |
+| **D20** | **Adopt the transductive imputer** — fit the per-column imputers on train **and test features combined** | The imputer predicts *features from features*; the target is never involved, so using unlabelled test rows is legitimate. Gives it 11,000 rows instead of 8,000 **and** direct exposure to the distribution it must impute into. Since imputation was our highest-leverage component, improving it compounds | 3.2199 → **3.2086**; with 5 seeds → **3.1994** |
+| **D21** | Reject residual boosting, target encoding, per-building models, building×month, occupancy transforms | Ridge's residuals carry no learnable structure; the rest duplicate what the building×hour terms already express | residual boost 3.257/3.284; target encoding 3.246; per-building 3.249; building×month 3.257; occupancy transforms 3.246 |
+| **D22** | **Measure covariate shift, then deliberately leave it uncorrected** | A train-vs-test classifier reaches **AUC 0.688**. This is *not* a missingness artefact — removing the flags leaves it at 0.689, and complete-cases-only still gives **0.654**. But all four importance-weighting variants made things worse. Covariate shift only induces bias under misspecification; with a stable `P(energy│features)`, reweighting removes no bias and adds variance. Raw weights were also pathological (0.005 to 164, median 0.21) | unweighted 3.226 vs weighted 3.280–3.510 |
+| **D23** | Reject pseudo-labelling | Marginally helpful alone (3.2431), but *harmful* once the imputer went transductive (3.2110 vs 3.2086) — both exploit the same unlabelled information, so they compete rather than compound | — |
+
+---
+
+## Platform compatibility — the submissions folder
+
+The organisers' template folder (`requirements-image.txt`, `template_notebook.ipynb`,
+`sample_submission.csv`) revealed three issues that would have caused failure or a zero.
+
+| # | Decision | Justification |
+|---|---|---|
+| **D24** | **Serialise with plain `joblib`, not `cloudpickle`** | `cloudpickle` is **not in the platform image**. A by-value pickle needs it at load time, so `model.pkl` would have raised `ModuleNotFoundError`. The prediction notebook now defines `make_features` and `SubModelImputer` itself, which is exactly how the official template expects feature engineering to be carried across |
+| **D25** | **Train against the platform library versions** (sklearn 1.5.2, pandas 2.2.3, lightgbm 4.5.0) | We had built against sklearn 1.9.1 / pandas 3.0.6. New pickles frequently fail to load under older libraries; the reverse is usually safe. Verified the scores are **identical** across both environments (RMSE 3.1994 either way), so this costs nothing and removes a failure mode |
+| **D26** | **Add a separate prediction notebook** (`kkboys_Track1_Prediction_Notebook.ipynb`) | The platform runs the uploaded notebook in a sandbox with **no internet and no `train.csv`** — it must only load the model and predict. Our training notebook is the artefact judges read; this is the artefact the platform executes |
+| **D27** | **Leaderboard CSV uses `id,prediction`; sandbox output uses `prediction` only** | Both formats are correct for different purposes. `sample_submission.csv` has `id,prediction` for the leaderboard upload; the platform's test file has no ID column and shuffled rows, so the sandbox writes one prediction per row in input order. Verified our ids and ordering match the official sample exactly |
+
+**Sandbox verification:** executed the prediction notebook under platform library versions, with no
+`train.csv`, a test file stripped of its ID column and shuffled, and `DATATHON_INPUT_PATH` /
+`DATATHON_OUTPUT_PATH` set. Ran clean, wrote 3,000 predictions.
+
+---
+
+## Final result
+
+**Ridge (α ≈ 1.2–1.7) on 370 building-aware features, with transductive sub-model imputation,
+trained on missingness-augmented data, averaged over 5 seeds.**
+
+| Metric | Realistic validation |
+|---|---|
+| **RMSE** | **3.1994** |
+| MAE | 2.5072 |
+| R² | 0.9699 |
+
+| Reference | RMSE |
+|---|---|
+| Predict global mean | 18.45 |
+| Predict building mean | 13.22 |
+| Copy `previous_usage` (no model) | 6.40 |
+| Earlier team blend, measured honestly | 3.745 |
+| **Final model** | **3.199** |
+
+**33 variations tested, 4 kept** (sub-model imputation, missingness augmentation, `temp × hour`,
+transductive imputation + seed averaging).
+
+---
+
 ## Deliverables
 
 | File | Status |
