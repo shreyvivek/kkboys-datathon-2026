@@ -75,6 +75,96 @@ trained on missingness-augmented data.**
 | Earlier team blend (naive 3.297) measured honestly | 3.745 |
 | **Final model** | **3.233** |
 
+---
+
+## Phase 3 / 5 — optimisation attempts
+
+Twelve further variations tested on the same protocol. **One kept.** The reference point for all
+of these is the single-seed model at **3.2257**.
+
+| # | Decision | Justification | Evidence |
+|---|---|---|---|
+| **D13** | **Keep the raw target** — reject `log1p` and delta framings (closes D5) | RMSE is scored on the raw scale, so a transform changes the implied loss. The delta framing additionally makes the prediction *structurally dependent* on `previous_usage`, which is absent in 6.8% of test rows — recovering a prediction requires adding back a column that isn't there | log1p **3.571**; delta **5.594** vs raw **3.226** |
+| **D14** | Reject additional interaction terms, splines, and `n_missing` interactions | The existing 288 building×hour profile terms and per-building slopes already express this structure; adding global versions duplicates it | extra interactions 3.247; splines 3.245; `n_missing`×prev 3.226 (identical to baseline) |
+| **D15** | Reject a specialist model for rows missing `previous_usage` | Routing those rows to a model trained without the feature scores the same as imputing it — meaning the sub-model imputer is already performing as well as avoiding the feature entirely. Imputation is no longer the bottleneck | specialist routing 3.228 vs 3.226 |
+| **D16** | Keep the imputer at 300 trees / lr 0.05, single pass | Larger and iterated imputers do not help; the bigger configuration overfits the observed rows | 800 trees 3.258; 800 2-pass 3.238; 1500 trees/63 leaves 3.241 |
+| **D17** | **Keep augmentation at exactly the observed test rate (×1.0)** | Confirms the original choice with evidence. Training on conditions harsher than reality degrades the learnable signal faster than it builds robustness | ×0.5 **3.230**, ×1.0 **3.226**, ×1.5 **3.231**, ×2.0 **3.238** |
+| **D18** | **Adopt 5-seed averaging** (the one accepted change) | The augmentation draw is random, so the seed is an arbitrary choice; averaging removes it. Variance reduction within a single model class, so it does not contradict rejecting the heterogeneous ensemble. Gain is small and inside fold noise — adopted because it is near-risk-free, not claimed as material | 1 seed 3.2257 → 3 seeds 3.2188 → **5 seeds 3.2176** |
+| — | *Not adopted:* 10-fold CV | Scores better (3.2173) but this changes the **measurement**, not the model — the final model trains on 100% of data regardless. Treated as a better estimate, not an improvement | — |
+
+### Interpretation
+
+Eleven rejections out of twelve is itself a finding: with `previous_usage` correlating 0.945 with
+the target, the remaining error is largely irreducible, concentrated in genuinely volatile
+buildings. Effort was redirected to the technical report and error analysis, which carry 40% of
+the Round 1 score.
+
+---
+
+## Phase 6–8 — further optimisation
+
+| # | Decision | Justification | Evidence |
+|---|---|---|---|
+| **D19** | **Adopt `temperature × hour` interactions** (`temp × hour_sin/cos`, `temp²`, `temp × occupancy`) | Cooling load depends on heat *and* time of day jointly — a hot afternoon is not a hot 3am. This was the one feature family never encoded | 3.2458 → **3.2399** |
+| **D20** | **Adopt the transductive imputer** — fit the per-column imputers on train **and test features combined** | The imputer predicts *features from features*; the target is never involved, so using unlabelled test rows is legitimate. Gives it 11,000 rows instead of 8,000 **and** direct exposure to the distribution it must impute into. Since imputation was our highest-leverage component, improving it compounds | 3.2199 → **3.2086**; with 5 seeds → **3.1994** |
+| **D21** | Reject residual boosting, target encoding, per-building models, building×month, occupancy transforms | Ridge's residuals carry no learnable structure; the rest duplicate what the building×hour terms already express | residual boost 3.257/3.284; target encoding 3.246; per-building 3.249; building×month 3.257; occupancy transforms 3.246 |
+| **D22** | **Measure covariate shift, then deliberately leave it uncorrected** | A train-vs-test classifier reaches **AUC 0.688**. This is *not* a missingness artefact — removing the flags leaves it at 0.689, and complete-cases-only still gives **0.654**. But all four importance-weighting variants made things worse. Covariate shift only induces bias under misspecification; with a stable `P(energy│features)`, reweighting removes no bias and adds variance. Raw weights were also pathological (0.005 to 164, median 0.21) | unweighted 3.226 vs weighted 3.280–3.510 |
+| **D23** | Reject pseudo-labelling | Marginally helpful alone (3.2431), but *harmful* once the imputer went transductive (3.2110 vs 3.2086) — both exploit the same unlabelled information, so they compete rather than compound | — |
+
+---
+
+## Platform compatibility — the submissions folder
+
+The organisers' template folder (`requirements-image.txt`, `template_notebook.ipynb`,
+`sample_submission.csv`) revealed three issues that would have caused failure or a zero.
+
+| # | Decision | Justification |
+|---|---|---|
+| **D24** | **Serialise with plain `joblib`, not `cloudpickle`** | `cloudpickle` is **not in the platform image**. A by-value pickle needs it at load time, so `model.pkl` would have raised `ModuleNotFoundError`. The prediction notebook now defines `make_features` and `SubModelImputer` itself, which is exactly how the official template expects feature engineering to be carried across |
+| **D25** | **Train against the platform library versions** (sklearn 1.5.2, pandas 2.2.3, lightgbm 4.5.0) | We had built against sklearn 1.9.1 / pandas 3.0.6. New pickles frequently fail to load under older libraries; the reverse is usually safe. Verified the scores are **identical** across both environments (RMSE 3.1994 either way), so this costs nothing and removes a failure mode |
+| **D26** | **Add a separate prediction notebook** (`kkboys_Track1_Prediction_Notebook.ipynb`) | The platform runs the uploaded notebook in a sandbox with **no internet and no `train.csv`** — it must only load the model and predict. Our training notebook is the artefact judges read; this is the artefact the platform executes |
+| **D27** | **Leaderboard CSV uses `id,prediction`; sandbox output uses `prediction` only** | Both formats are correct for different purposes. `sample_submission.csv` has `id,prediction` for the leaderboard upload; the platform's test file has no ID column and shuffled rows, so the sandbox writes one prediction per row in input order. Verified our ids and ordering match the official sample exactly |
+
+**Sandbox verification:** executed the prediction notebook under platform library versions, with no
+`train.csv`, a test file stripped of its ID column and shuffled, and `DATATHON_INPUT_PATH` /
+`DATATHON_OUTPUT_PATH` set. Ran clean, wrote 3,000 predictions.
+
+---
+
+## Final result
+
+**Ridge (α ≈ 1.2–1.7) on 370 building-aware features, with transductive sub-model imputation,
+trained on missingness-augmented data, averaged over 5 seeds.**
+
+| Metric | Realistic validation |
+|---|---|
+| **RMSE** | **3.1994** |
+| MAE | 2.5072 |
+| R² | 0.9699 |
+
+| Reference | RMSE |
+|---|---|
+| Predict global mean | 18.45 |
+| Predict building mean | 13.22 |
+| Copy `previous_usage` (no model) | 6.40 |
+| Earlier team blend, measured honestly | 3.745 |
+| **Final model** | **3.199** |
+
+**33 variations tested, 4 kept** (sub-model imputation, missingness augmentation, `temp × hour`,
+transductive imputation + seed averaging).
+
+---
+
+## Deliverables
+
+| File | Status |
+|---|---|
+| `Track1_Smart_Campus_Analytics.ipynb` | Full pipeline, executes end-to-end with zero errors |
+| `model.pkl` | Seed-averaged final model, `cloudpickle` by-value, verified in a clean environment |
+| `report/technical_report.pdf` | 1 page, verified |
+| `requirements.txt` | All notebook dependencies pinned |
+| `predict_from_model.py` | Standalone inference script |
+
 ### Open items
 
 - Submission CSV currently has a single `prediction` column and no `id`, matching the booklet's
@@ -82,3 +172,19 @@ trained on missingness-augmented data.**
   organisers**; a format mismatch would score zero silently.
 - Error analysis by building (high-variance buildings like LectureHall dominate residual error)
   is not yet written up — it is explicitly named in Track 1's judging focus.
+
+---
+
+## Phase 9 — test-matched validation & v2 model (2026-10-03, in progress)
+
+| # | Decision | Justification | Evidence |
+|---|---|---|---|
+| **D28** | **Replace independent per-column NaN injection with test-matched gap patterns** (validation *and* training augmentation) | Test gaps are clustered by count, not independent: 81.8% none / 10.5% one / **6.9% two** / 0.8% three, with the gapped columns uniform and unrelated to building/hour/values. Independent injection gives only ~2.6% two-gap rows, so it under-weights exactly the hardest rows ~3× | Pair lifts over independence in test: 2.7–4.0×. Current production model scores **3.338** under test-matched validation (vs 3.20 under the old protocol) |
+| **D29** | **NaN-native imputer**: co-missing predictors passed to the per-column LightGBMs as NaN (not median-filled), plus 15% predictor-gap augmentation when fitting them | The old imputer filled a co-missing driver with its global median before imputing, so a row missing occupancy *and* prev imputed each from a fake value of the other | 3.338 → **3.291** (mean of 2 CV reps); occ+prev rows 7.45/6.70 → 6.38/5.55 |
+| **D30** | **Blend Ridge with an MLP and a native-NaN LightGBM** (fixed NNLS weights 0.66/0.22/0.12) | Complete-row linear modelling is saturated (14 feature families, stacking, transition-hour terms all ≥ Ridge), but an MLP is a genuinely different error source | 3.291 → **3.265** held out across reps (weights fit on one rep, scored on the other) |
+| **D31** | **Rows missing `previous_usage` get their own weights, leaning ~48% on a Ridge trained without prev** | When the strongest feature is absent, a model that never relied on it beats imputing it. Two groups only: a 7-group/pair-level scheme scored the same (3.2572) with ~25 more weights and visibly overfit on ~100-row groups | **3.258** held out; weights stable across reps |
+| **D32** | Reject scenario-regime features and scenario-weighted training | The test oversamples generated scenarios ~5× (heatwave 34–36 °C at 12–16h: 0.9%→4.3%; storm humidity ≥95: 0.9%→4.3%; night prev-drop: 0.6%→3.5%; occupancy surges: 2%→10%). Their extra error is noise, not missed structure | Indicator/interaction features and test-ratio sample weights all worse even on a test-weighted metric (3.094–3.147 vs 3.089) |
+
+**Net (test-matched CV, before 5-seed averaging): 3.338 → 3.258 (−0.081).**
+Pending: production-class CV check (`train_final_model.py --cv`), final 5-seed `model.pkl`, sandbox run of the
+regenerated prediction notebook, report update.
